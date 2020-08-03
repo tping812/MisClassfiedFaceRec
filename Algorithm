@@ -1,0 +1,353 @@
+import numpy as np
+import os
+import cv2
+from imageio import imread
+from skimage.transform import resize
+from scipy.spatial import distance
+from keras.models import load_model
+import random
+from keras.models import Sequential
+from keras.layers import Conv2D, ZeroPadding2D, Activation, Input, concatenate
+from keras.models import Model
+from keras.layers.normalization import BatchNormalization
+from keras.layers.pooling import MaxPooling2D, AveragePooling2D
+from keras.layers.merge import Concatenate
+from keras.layers.core import Lambda, Flatten, Dense
+from keras.initializers import glorot_uniform
+from keras.engine.topology import Layer
+from keras import backend as K
+K.set_image_data_format('channels_first')
+from numpy import genfromtxt
+import pandas as pd
+import tensorflow as tf
+from fr_utils import *
+from inception_blocks_v2 import *
+import imutils
+from FaceDetector import *
+import pickle
+import sys
+cascade_path = 'model/haarcascade_frontalface_alt2.xml'
+import tensorflow as tf
+import os
+from PIL import Image
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+graph_def = tf.compat.v1.GraphDef()
+filename = "google_facenet.pb"
+with tf.io.gfile.GFile(filename, 'rb') as f:
+    graph_def.ParseFromString(f.read())
+    tf.import_graph_def(graph_def, name='') 
+tf.import_graph_def(graph_def)
+def setmatrix(W,b):
+    matrix_a = np.mat(W,dtype=float)
+    matrix_b = np.mat(b,dtype=float)
+    return matrix_a, matrix_b
+def SequentialGauss(mat_a):
+    for i in range(0, (mat_a.shape[0])-1):
+        if mat_a[i, i] == 0:
+            print("terminal")
+            for j in range(i+1, mat_a.shape[0]):
+                mat_a[j:j+1 , :]= 0
+            break
+        else:
+            for j in range(i+1, mat_a.shape[0]):
+                mat_a[j:j+1 , :] = mat_a[j:j+1,:] -  (mat_a[j,i]/mat_a[i,i])*mat_a[i, :]
+    return mat_a
+def revert(new_mat):
+    x = np.mat(np.zeros(new_mat.shape[0], dtype=float))
+    number = x.shape[1]-1
+    b = number+1
+    x[0,number] = new_mat[number,b]/new_mat[number, number]
+    for i in range(number-1,-1,-1):
+        try:
+            x[0,i] = (new_mat[i,b]-np.sum(np.multiply(new_mat[i,i+1:b],x[0,i+1:b])))/(new_mat[i,i])
+        except:print("error")
+    return x
+def l2_normalize(x, axis=-1, epsilon=1e-10):
+    output = x / np.sqrt(np.maximum(np.sum(np.square(x), axis=axis, keepdims=True), epsilon))
+    return output
+def calc_embs_2(image, margin=10, batch_size=1):
+    aligned_images = prewhiten_2(load_and_align_images_2(image))
+    pd = []
+    for start in range(0, len(aligned_images), batch_size):
+        pd.append(model.predict_on_batch(aligned_images[start:start+batch_size]))
+    embs = l2_normalize(np.concatenate(pd))
+    return embs
+def calc_dist_2(emb1, emb2):
+    return distance.euclidean(emb1,emb2)
+def load_align_images_2(image):
+    aligned_images = []
+    aligned = image
+    aligned_images.append(aligned)
+    return np.array(aligned_images)
+def prewhiten_2(x):
+    if x.ndim == 4:
+        axis = (1, 2, 3)
+        size = x[0].size
+    elif x.ndim == 3:
+        axis = (0, 1, 2)
+        size = x.size
+    else:
+        raise ValueError('Dimension should be 3 or 4')
+    mean = np.mean(x, axis=axis, keepdims=True)
+    std = np.std(x, axis=axis, keepdims=True)
+    std_adj = np.maximum(std, 1.0/np.sqrt(size))
+    y = (x - mean) / std_adj
+    return y
+def load_and_align_images_3(image, margin):
+    cascade = cv2.CascadeClassifier(cascade_path)
+    aligned_images = []
+    faces = cascade.detectMultiScale(image,
+                                     scaleFactor=1.1,
+                                     minNeighbors=3)
+    if faces != ():
+        (x, y, w, h) = faces[0]
+        if x >margin :
+            if y >margin :
+                cropped = image[y-margin//2:y+h+margin//2,
+                            x-margin//2:x+w+margin//2, :]
+                aligned = resize(cropped, (160, 160), mode='reflect')
+            else:
+                aligned = np.array(max_array)
+        else:
+            aligned = np.array(max_array)
+    else:
+        aligned = np.array(max_array)
+    return aligned
+m_array = [999,999,999]
+max_array = []
+for i in range(160):
+    max_array.append([])
+    for j in range(160):
+        max_array[i].append(m_array)
+iii_value = 5000
+data = {}
+input_node = 'input_1:0'
+output_layer = 'Bottleneck_BatchNorm/batchnorm_1/add_1:0'
+image_dir_basepath = 'image/'
+iii= 0
+with tf.compat.v1.Session() as sess:
+    for file in os.listdir(image_dir_basepath):
+        image_dirpath = image_dir_basepath + file
+        for f in os.listdir(image_dirpath):
+            image_filepaths = os.path.join(image_dirpath, f) 
+            image1 = imread(image_filepaths)
+            image = load_and_align_images_3(image1,10)
+            image = load_align_images_2(image)
+            image_np = prewhiten_2(image)
+            x_train = image_np
+            prob_tensor = sess.graph.get_tensor_by_name(output_layer)
+            emb = sess.run(prob_tensor, {input_node: x_train })
+            emb = [emb]
+            emb = l2_normalize(np.concatenate(emb))
+            data[f] = {'image_filepath' : image_filepaths,'emb' : emb}
+        if iii == iii_value:break
+        iii+=1
+    identity = []
+    for file in os.listdir(image_dir_basepath):
+        image_dirpath = image_dir_basepath + file
+        for f in os.listdir(image_dirpath):
+            identity.append(f)
+            if len(identity)>=len(data):
+                break
+    print('####################################')
+    print('Data amount : ',len(data))
+    print('####################################')
+    name = []
+    for file in os.listdir(image_dir_basepath):
+        image_dirpath = image_dir_basepath + file
+        name.append(image_dirpath)
+    iii=0
+    lr_rate = 0.000005
+    w_input = tf.placeholder(tf.float32, name='w_input')
+    a_input = tf.placeholder(tf.float32, name='a_input')
+    d = tf.multiply(w_input, a_input)
+    G = tf.gradients(d,a_input)
+    init = tf.global_variables_initializer()
+    answer_dic = {}
+    dist = 999
+    dist_array = []
+    test_time =0
+    W = []
+    name_path = []
+    name_in_database = []
+    changed_pixel = 0
+    while True:
+        for file in os.listdir(image_dir_basepath):
+            image_dirpath = image_dir_basepath + file
+            for f in os.listdir(image_dirpath):
+                for k in range(5):
+                    image_filepaths = os.path.join(image_dirpath, f) 
+                    image1 = imread(image_filepaths)
+                    r = random.randint(0,255)
+                    g = random.randint(0,255)
+                    b = random.randint(0,255)
+                    x = random.randint(0,249-changed_pixel)
+                    y = random.randint(0,249-changed_pixel)
+                    W.append([x,y,r,g,b])
+                    for i in range(changed_pixel):
+                        for j in range(changed_pixel):
+                            image1[x+i][y+j]=[r,g,b]                                                                                     
+                    image = load_and_align_images_3(np.array(image1),10)
+                    image = load_align_images_2(image)
+                    image_np = prewhiten_2(image)
+                    x_train = image_np
+                    emb = sess.run(prob_tensor, {input_node: x_train })
+                    emb = [emb]
+                    emb = l2_normalize(np.concatenate(emb))
+                    dist = calc_dist_2(emb,data[f]['emb'])
+                    dist_array.append(dist)            
+                ma,mb =setmatrix(W,dist_array)
+                new_mat = SequentialGauss(np.hstack((ma, mb.T)))
+                answer  = revert(new_mat)
+                if answer.all()!=0 :
+                    sess.run(init)
+                    gradient = sess.run(G,feed_dict={w_input:W,a_input:answer})
+                    answer_dic[f] = {'pixel':W,'gradient':gradient[0],'answer' : answer }
+                    name_path.append(image_filepaths)
+                    name_in_database.append(f)
+    
+                dist_array=[]
+                W = []
+            if iii >=iii_value:
+                break
+            iii+=1
+        if iii >= iii_value:
+            break
+    invade_rate = 0
+    invade_count =0
+    test_count = 0
+    test_round=0
+    average_pixel_value_count =0
+    avg_x = avg_y = avg_r = avg_g = avg_b =0
+    best_pixel_record =[]
+    best_invade_rate = 0
+    invade_before=-1
+    while True:
+        for file in os.listdir(image_dir_basepath):
+            image_dirpath = image_dir_basepath + file
+            for f in os.listdir(image_dirpath):
+                if f not in data:
+                    continue
+                elif f not in answer_dic:
+                    for k in range(5):
+                        image_filepaths = os.path.join(image_dirpath, f) 
+                        image1 = imread(image_filepaths)
+                        r = random.randint(0,255)
+                        g = random.randint(0,255)
+                        b = random.randint(0,255)
+                        x = random.randint(0,249-changed_pixel)
+                        y = random.randint(0,249-changed_pixel)
+                        W.append([x,y,r,g,b])
+                        for i in range(changed_pixel):
+                            for j in range(changed_pixel):
+                                image1[x+i][y+j]=[r,g,b]  
+                        image = load_and_align_images_3(np.array(image1),10)
+                        image = load_align_images_2(image)
+                        image_np = prewhiten_2(image)
+                        x_train = image_np
+                        prob_tensor = sess.graph.get_tensor_by_name(output_layer)
+                        emb = sess.run(prob_tensor, {input_node: x_train })
+                        emb = [emb]
+                        emb = l2_normalize(np.concatenate(emb))
+                        dist_array.append(calc_dist_2(emb,data[f]['emb']))  
+                else:
+                    for k in range(len(answer_dic[f]['pixel'])):
+                        for j in range(len(answer_dic[f]['pixel'][k])):
+                            answer_dic[f]['pixel'][k][j]=answer_dic[f]['pixel'][k][j] + answer_dic[f]['gradient'][0][j]*lr_rate/(invade_rate)
+                    W = answer_dic[f]['pixel']
+                    image_filepaths = os.path.join(image_dirpath, f)                   
+                    for g in range(len(W)):
+                        image1 = imread(image_filepaths)
+                        if W[g][0] <249-changed_pixel and W[g][1]<249-changed_pixel :
+                            for k in range(changed_pixel):
+                                for j in range(changed_pixel):
+                                    image1[int(W[g][0]+k)][int(W[g][1]+j)]=[W[g][2],W[g][3],W[g][4]]
+                                    
+                        image = load_and_align_images_3(np.array(image1),10)
+                        image = load_align_images_2(image)
+                        image_np = prewhiten_2(image)
+                        x_train = image_np
+                        prob_tensor = sess.graph.get_tensor_by_name(output_layer)
+                        emb = sess.run(prob_tensor, {input_node: x_train })
+                        emb = [emb]
+                        emb = l2_normalize(np.concatenate(emb))
+                        dist_array.append(calc_dist_2(emb,data[f]['emb']))
+                if len(dist_array)<5:
+                    for k in range(5-len(dist_array)):
+                        dist_array.append(0)
+                for i in dist_array : 
+                    if i >0.5:
+                        invade_count+=1
+                test_count+=1
+                ma,mb =setmatrix(W,dist_array)
+                new_mat = SequentialGauss(np.hstack((ma, mb.T)))
+                answer  = revert(new_mat)
+                if answer.all()!=0 :
+                    test_time+=1
+                    sess.run(init)
+                    gradient = sess.run(G,feed_dict={w_input:W,a_input:answer})
+                    answer_dic[f] = {'pixel':W,'gradient':gradient[0],'answer' : answer }
+                print('test_count : %4d'%(test_count),'max dist_array : %.5f'%max(dist_array),'\ninvade_count :',invade_count)
+                dist_array=[]
+                W = []
+        invade_rate = (invade_count/test_count)
+        for file in os.listdir(image_dir_basepath):
+            image_dirpath = image_dir_basepath + file
+            for f in os.listdir(image_dirpath):
+                if f  in answer_dic:
+                    for i in range(len(answer_dic[f]['pixel'])):                    
+                        average_pixel_value_count +=1
+                        print(avg_x)
+                        avg_x += answer_dic[f]['pixel'][i][0]
+                        avg_y += answer_dic[f]['pixel'][i][1]
+                        avg_r += answer_dic[f]['pixel'][i][2]
+                        avg_g += answer_dic[f]['pixel'][i][3]
+                        avg_b += answer_dic[f]['pixel'][i][4]
+        if avg_x !=0 :
+            avg_x = int(avg_x / average_pixel_value_count)
+        if avg_y !=0 :
+            avg_y = int(avg_y / average_pixel_value_count)
+        if avg_r !=0 :
+            avg_r = int(avg_r / average_pixel_value_count)
+        if avg_g !=0 :
+            avg_g = int(avg_g / average_pixel_value_count)
+        if avg_b !=0 :
+            avg_b = int(avg_b / average_pixel_value_count)
+        if invade_rate > best_invade_rate :
+            best_invade_rate = invade_rate
+            best_pixel_record = [avg_x,avg_y,avg_r,avg_g,avg_b]  
+        avg_invade_count=0
+        avg_count=0
+        avg_dist = 0
+        for file in os.listdir(image_dir_basepath):
+            image_dirpath = image_dir_basepath + file
+            for f in os.listdir(image_dirpath):
+                if f  in data:
+                    image1[avg_x][avg_y]=[avg_r,avg_g,avg_b]
+                    image = load_and_align_images_3(np.array(image1),10)
+                    image = load_align_images_2(image)
+                    image_np = prewhiten_2(image)
+                    x_train = image_np
+                    prob_tensor = sess.graph.get_tensor_by_name(output_layer)
+                    emb = sess.run(prob_tensor, {input_node: x_train })
+                    emb = [emb]
+                    emb = l2_normalize(np.concatenate(emb))
+                    avg_dist = calc_dist_2(emb,data[f]['emb'])
+                    if avg_dist<=1:
+                        avg_invade_count+=1
+                    avg_count+=1
+        invade_rate = avg_invade_count/avg_count                   
+        if invade_before <0:
+            invade_before = invade_rate
+        elif invade_rate < invade_before:
+            lr_rate = lr_rate * -1
+        invade_before = invade_rate
+        avg_x = avg_y = avg_r = avg_g = avg_b =0
+        average_pixel_value_count = 0
+        invade_count = 0
+        test_count =0
+        test_round+=1
+        if test_round >=100:
+            break
+        elif invade_rate >=0.5:
+            break
